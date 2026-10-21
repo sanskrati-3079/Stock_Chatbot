@@ -1,0 +1,8 @@
+streamlit==1.36.0
+requests==2.32.3
+plotly==5.22.0
+python-dotenv==1.0.1
+pandas==2.3.3
+numpy==2.5.4
+# Time-zone data for market open/closed status (bundled with macOS/Linux, missing on Windows)
+tzdata; sys_platform == "win32"
