@@ -11,11 +11,20 @@ Performance / optimization notes:
   - TTLCache avoids re-hitting Yahoo Finance for the same ticker within
     a short window (huge speedup for repeated chat queries).
   - All heavy numeric work is vectorized with pandas/numpy.
+
+Deployment notes:
+  - yfinance keeps a small on-disk cache (timezones, cookies). Serverless
+    hosts like Vercel only allow writes under /tmp, so we point it there.
+  - No scikit-learn: the trend line is a plain least-squares fit via
+    numpy.polyfit, which keeps the deploy bundle small.
 """
 
 from __future__ import annotations
 
-import time
+import logging
+import os
+import tempfile
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -23,31 +32,68 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from cachetools import TTLCache
-from sklearn.linear_model import LinearRegression
+from yfinance.exceptions import YFRateLimitError
+
+# yfinance logs every unknown ticker as an ERROR; we already turn those into
+# a clean 404 / chat reply, so keep the server log quiet.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
+yf.set_tz_cache_location(
+    os.getenv("YF_CACHE_DIR", os.path.join(tempfile.gettempdir(), "py-yfinance"))
+)
 
 # ---------------------------------------------------------------------------
 # Simple in-memory TTL cache: ticker+period -> dataframe (5 minute freshness)
 # ---------------------------------------------------------------------------
+# TTLCache is not thread-safe and FastAPI runs sync endpoints in a thread
+# pool, so every access goes through a lock.
 _DATA_CACHE: TTLCache = TTLCache(maxsize=256, ttl=300)
+_CURRENCY_CACHE: TTLCache = TTLCache(maxsize=1024, ttl=24 * 3600)
+_CACHE_LOCK = threading.Lock()
 
 
 class TickerNotFoundError(Exception):
     pass
 
 
+class DataSourceError(Exception):
+    """Yahoo Finance is unreachable or rate-limiting us (retryable)."""
+
+
 def fetch_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     cache_key = f"{ticker}|{period}|{interval}"
-    if cache_key in _DATA_CACHE:
-        return _DATA_CACHE[cache_key]
+    with _CACHE_LOCK:
+        cached = _DATA_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
-    tk = yf.Ticker(ticker)
-    df = tk.history(period=period, interval=interval, auto_adjust=True)
+    try:
+        df = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True)
+    except YFRateLimitError as exc:
+        raise DataSourceError("Yahoo Finance is rate-limiting requests. Try again shortly.") from exc
+
+    # Rows without a close price are useless and would put NaN into the JSON.
+    if df is not None and not df.empty and "Close" in df:
+        df = df.dropna(subset=["Close"])
     if df is None or df.empty:
         raise TickerNotFoundError(f"No data found for ticker '{ticker}'.")
 
-    df = df.dropna(how="all")
-    _DATA_CACHE[cache_key] = df
+    with _CACHE_LOCK:
+        _DATA_CACHE[cache_key] = df
     return df
+
+
+def _get_currency(ticker: str) -> Optional[str]:
+    with _CACHE_LOCK:
+        if ticker in _CURRENCY_CACHE:
+            return _CURRENCY_CACHE[ticker]
+    try:
+        currency = getattr(yf.Ticker(ticker).fast_info, "currency", None)
+    except Exception:
+        return None  # don't cache failures; next request can retry
+    with _CACHE_LOCK:
+        _CURRENCY_CACHE[ticker] = currency
+    return currency
 
 
 def _sma(series: pd.Series, window: int) -> pd.Series:
@@ -88,14 +134,13 @@ def _bollinger(series: pd.Series, window: int = 20, num_std: float = 2.0):
 
 def _forecast_next_days(series: pd.Series, days_ahead: int = 5):
     """Lightweight linear-regression forecast on the last 30 sessions."""
-    recent = series.tail(30).reset_index(drop=True)
-    X = np.arange(len(recent)).reshape(-1, 1)
-    y = recent.values
-    model = LinearRegression()
-    model.fit(X, y)
-    future_X = np.arange(len(recent), len(recent) + days_ahead).reshape(-1, 1)
-    preds = model.predict(future_X)
-    slope = model.coef_[0]
+    y = series.tail(30).to_numpy(dtype=float)
+    if len(y) < 2:
+        return [float(y[-1])] * days_ahead, 0.0
+    X = np.arange(len(y))
+    slope, intercept = np.polyfit(X, y, 1)
+    future_X = np.arange(len(y), len(y) + days_ahead)
+    preds = slope * future_X + intercept
     return preds.tolist(), float(slope)
 
 
@@ -187,12 +232,7 @@ def analyze_stock(ticker: str, period: str = "6mo", forecast_days: int = 5) -> P
 
     confidence = min(100.0, 50 + abs(score) * 12.5)
 
-    currency = None
-    try:
-        info = yf.Ticker(ticker).fast_info
-        currency = getattr(info, "currency", None)
-    except Exception:
-        pass
+    currency = _get_currency(ticker)
 
     hist_tail = df.tail(120)
     return PredictionResult(

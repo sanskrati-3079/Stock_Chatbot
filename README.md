@@ -27,44 +27,23 @@ stock_chatbot/
 │   └── requirements.txt
 ├── .env                       # working default config (no keys required)
 ├── .env.example
-├── run_backend.sh
 ├── run_frontend.sh
 └── README.md
 ```
 
 ## 2. Setup
 
-Requires Python 3.10+.
+Requires Python 3.12+.
 
 ```bash
-# 1. Unzip and enter the project
-cd stock_chatbot
-
-# 2. (Recommended) create a virtual environment
-python3 -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
-
-# 3. Start the backend (Terminal 1)
-bash run_backend.sh
+cd Stock_Chatbot/backend
+./start.sh
+# -> first run creates .venv and installs everything (about 15 s)
 # -> runs FastAPI on http://localhost:8000
 # -> interactive API docs at http://localhost:8000/docs
-
-# 4. Start the frontend (Terminal 2)
-bash run_frontend.sh
-# -> opens Streamlit UI, usually http://localhost:8501
 ```
 
-If `run_*.sh` doesn't work on your OS, just run manually:
-
-```bash
-# backend
-cd backend && pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-
-# frontend (new terminal)
-cd frontend && pip install -r requirements.txt
-streamlit run app.py
-```
+No need to create or activate a virtual environment yourself; `start.sh` does it.
 
 ## 3. Using the chatbot
 
@@ -105,7 +84,7 @@ The combined score maps to `BUY` / `HOLD` / `SELL` with a confidence percentage.
 - Add more companies to `COMMON_NAME_MAP` in `ticker_resolver.py`.
 - Add a paid data provider as fallback (Alpha Vantage / Finnhub) — the `.env` already has placeholders.
 - Swap the forecasting model in `predictor.py::_forecast_next_days` for something fancier.
-- Deploy backend on Render/Railway/Fly.io and frontend on Streamlit Community Cloud — just update `BACKEND_URL` in `.env`.
+- Deploy the backend on Vercel or Render; see [DEPLOYMENT.md](DEPLOYMENT.md). Deploy the frontend on Streamlit Community Cloud and set `BACKEND_URL` to the backend URL.
 
 ## 7. Performance notes
 

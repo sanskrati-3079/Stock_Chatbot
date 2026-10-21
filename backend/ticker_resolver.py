@@ -8,9 +8,10 @@ NSE, BSE, LSE, etc.) as long as the correct suffix is used
 """
 
 import re
-from functools import lru_cache
+import threading
 
 import yfinance as yf
+from cachetools import TTLCache
 
 # A curated map of common company names -> Yahoo Finance tickers.
 # This is only a convenience layer for chat-style queries like
@@ -71,6 +72,8 @@ _STOPWORDS = {
     "what", "about", "tell", "me", "analyse", "analyze", "check",
     "forecast", "can", "you", "please", "kya", "hai", "batao",
     "karo", "karu", "bech", "bechna", "kharid", "kharidna",
+    "how", "doing", "are", "do", "does", "now", "worth", "invest",
+    "in", "to", "my", "outlook", "looking", "buying", "selling", "chahiye",
 }
 
 _TICKER_REGEX = re.compile(r"^[A-Z0-9.\-\^]{1,15}$")
@@ -80,17 +83,26 @@ def _looks_like_ticker(token: str) -> bool:
     return bool(_TICKER_REGEX.match(token.upper()))
 
 
-@lru_cache(maxsize=512)
+# Only successful lookups are cached, so a transient network error or rate
+# limit doesn't permanently break a query for the life of the server.
+_SEARCH_CACHE: TTLCache = TTLCache(maxsize=512, ttl=24 * 3600)
+_SEARCH_LOCK = threading.Lock()
+
+
 def _yf_search(query: str):
     """Fallback: hit Yahoo Finance's search endpoint via yfinance."""
+    with _SEARCH_LOCK:
+        if query in _SEARCH_CACHE:
+            return _SEARCH_CACHE[query]
     try:
         result = yf.Search(query, max_results=1)
         quotes = getattr(result, "quotes", None) or []
-        if quotes:
-            return quotes[0].get("symbol")
     except Exception:
         return None
-    return None
+    symbol = quotes[0].get("symbol") if quotes else None
+    with _SEARCH_LOCK:
+        _SEARCH_CACHE[query] = symbol
+    return symbol
 
 
 def resolve_ticker(text: str) -> str | None:
